@@ -1,0 +1,32 @@
+[
+  {
+    "id": "ashare_news_001",
+    "date": "2026-05-15",
+    "source": "Demo A股资讯",
+    "title": "贵州茅台近期主力资金和白酒板块情绪受到关注",
+    "summary": "市场关注白酒板块估值、动销节奏和资金流向变化，贵州茅台作为龙头标的受到持续跟踪。",
+    "related_symbols": ["600519.SH"],
+    "sentiment_hint": "risk",
+    "fetched_via": "local_sample"
+  },
+  {
+    "id": "ashare_news_002",
+    "date": "2026-04-25",
+    "source": "Demo 公告摘要",
+    "title": "贵州茅台披露季度报告相关公告",
+    "summary": "财报信息可用于观察营收、净利润、现金分红和经营目标等基本面变化。",
+    "related_symbols": ["600519.SH"],
+    "sentiment_hint": "neutral",
+    "fetched_via": "local_sample"
+  },
+  {
+    "id": "ashare_news_003",
+    "date": "2026-04-17",
+    "source": "Demo 行业观察",
+    "title": "白酒行业需求结构和价格体系仍是市场讨论重点",
+    "summary": "行业新闻提示关注终端动销、渠道库存、产品价格和消费复苏节奏的不确定性。",
+    "related_symbols": ["600519.SH"],
+    "sentiment_hint": "risk",
+    "fetched_via": "local_sample"
+  }
+]

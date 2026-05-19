@@ -1,0 +1,35 @@
+{
+  "user_id": "demo_user_001",
+  "base_currency": "CNY",
+  "as_of_date": "2026-05-16",
+  "risk_profile": "moderate",
+  "positions": [
+    {
+      "symbol": "AAPL",
+      "name": "Apple Inc.",
+      "asset_type": "US Equity",
+      "quantity": 12,
+      "cost_price": 168.5,
+      "market_price": 185.2,
+      "sector": "Technology"
+    },
+    {
+      "symbol": "TSLA",
+      "name": "Tesla Inc.",
+      "asset_type": "US Equity",
+      "quantity": 8,
+      "cost_price": 210.0,
+      "market_price": 198.4,
+      "sector": "Consumer Discretionary"
+    },
+    {
+      "symbol": "0700.HK",
+      "name": "Tencent Holdings Ltd.",
+      "asset_type": "HK Equity",
+      "quantity": 100,
+      "cost_price": 320.0,
+      "market_price": 378.6,
+      "sector": "Communication Services"
+    }
+  ]
+}

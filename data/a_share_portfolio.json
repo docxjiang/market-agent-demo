@@ -1,0 +1,21 @@
+{
+  "user_id": "demo_a_share_user_001",
+  "base_currency": "CNY",
+  "as_of_date": "2026-05-17",
+  "risk_profile": "moderate",
+  "market": "A股",
+  "positions": [
+    {
+      "symbol": "600519.SH",
+      "code": "600519",
+      "name": "贵州茅台",
+      "asset_type": "A股",
+      "quantity": 100,
+      "cost_price": 1500.0,
+      "market_price": 1370.0,
+      "sector": "食品饮料",
+      "exchange": "上海证券交易所",
+      "secid": "1.600519"
+    }
+  ]
+}

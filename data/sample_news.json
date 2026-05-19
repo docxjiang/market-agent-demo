@@ -1,0 +1,29 @@
+[
+  {
+    "id": "news_001",
+    "date": "2026-05-15",
+    "source": "Demo Finance Daily",
+    "title": "大型科技公司公布新一轮 AI 资本开支计划",
+    "summary": "多家大型科技公司披露未来一年将继续提高 AI 基础设施投入，市场关注相关支出对利润率和供应链需求的影响。",
+    "related_symbols": ["AAPL", "0700.HK"],
+    "sentiment_hint": "mixed"
+  },
+  {
+    "id": "news_002",
+    "date": "2026-05-15",
+    "source": "Demo Market Watch",
+    "title": "电动车行业价格竞争仍在持续",
+    "summary": "电动车厂商继续通过降价和促销争夺市场份额，分析人士提示毛利率波动和库存变化值得关注。",
+    "related_symbols": ["TSLA"],
+    "sentiment_hint": "negative"
+  },
+  {
+    "id": "news_003",
+    "date": "2026-05-14",
+    "source": "Demo Macro Brief",
+    "title": "美元利率预期变化引发成长股波动",
+    "summary": "市场重新评估未来利率路径，成长股和高估值板块短线波动有所放大。",
+    "related_symbols": ["AAPL", "TSLA", "0700.HK"],
+    "sentiment_hint": "risk"
+  }
+]
