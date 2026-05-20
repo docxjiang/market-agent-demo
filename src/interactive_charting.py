@@ -17,8 +17,13 @@ PERIOD_WINDOWS = [
     ("最大值", None),
 ]
 
+CHART_WINDOW_OPTIONS = ["1日", "1周", "1月", "3个月", "6个月", "1年", "全部"]
+
 
 def prepare_interactive_price_frame(market_df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    if market_df.empty or "symbol" not in market_df.columns:
+        return pd.DataFrame()
+
     df = market_df[market_df["symbol"] == symbol].copy()
     if df.empty:
         return df
@@ -45,6 +50,80 @@ def prepare_interactive_price_frame(market_df: pd.DataFrame, symbol: str) -> pd.
     df["macd_bar"] = (df["macd_dif"] - df["macd_dea"]) * 2
     df["rsi14"] = _rsi(close, 14)
     return df
+
+
+def select_chart_window_frame(
+    daily_frame: pd.DataFrame,
+    intraday_frame: pd.DataFrame | None,
+    window: str,
+) -> pd.DataFrame:
+    if daily_frame.empty:
+        return daily_frame
+
+    if window in {"1日", "1周"} and intraday_frame is not None and not intraday_frame.empty:
+        source = _select_intraday_source(intraday_frame, window)
+        latest = source["date"].max()
+        start = latest.normalize() if window == "1日" else latest - pd.Timedelta(days=7)
+        filtered = source[source["date"] >= start].copy()
+        return filtered if not filtered.empty else source
+
+    source = daily_frame.copy()
+    latest = source["date"].max()
+    if window == "1月":
+        start = latest - pd.DateOffset(months=1)
+    elif window == "3个月":
+        start = latest - pd.DateOffset(months=3)
+    elif window == "6个月":
+        start = latest - pd.DateOffset(months=6)
+    elif window == "1年":
+        start = latest - pd.DateOffset(years=1)
+    elif window == "1周":
+        start = latest - pd.Timedelta(days=7)
+    elif window == "1日":
+        start = latest.normalize()
+    else:
+        return source
+
+    filtered = source[source["date"] >= start].copy()
+    return filtered if not filtered.empty else source.tail(1).copy()
+
+
+def format_chart_range(frame: pd.DataFrame) -> str:
+    if frame.empty:
+        return "-"
+    start = pd.to_datetime(frame.iloc[0]["date"], errors="coerce")
+    end = pd.to_datetime(frame.iloc[-1]["date"], errors="coerce")
+    if pd.isna(start) or pd.isna(end):
+        return "-"
+    if start.normalize() == start and end.normalize() == end:
+        return f"{start:%Y-%m-%d} 至 {end:%Y-%m-%d}"
+    if start.date() == end.date():
+        return f"{start:%Y-%m-%d %H:%M} 至 {end:%H:%M}"
+    return f"{start:%Y-%m-%d %H:%M} 至 {end:%Y-%m-%d %H:%M}"
+
+
+def format_data_source_label(source: str) -> str:
+    normalized = str(source or "").lower()
+    if normalized.startswith("eastmoney"):
+        provider = "东方财富"
+    elif normalized.startswith("sina"):
+        provider = "新浪财经"
+    elif normalized.startswith("akshare"):
+        provider = "AKShare"
+    else:
+        provider = source or "未知"
+
+    if "60m" in normalized:
+        return f"{provider}（60分钟）"
+    if "30m" in normalized:
+        return f"{provider}（30分钟）"
+    if "15m" in normalized:
+        return f"{provider}（15分钟）"
+    if "5m" in normalized:
+        return f"{provider}（5分钟）"
+    if "1m" in normalized:
+        return f"{provider}（1分钟）"
+    return f"{provider}（日线）"
 
 
 def build_interactive_technical_figure(frame: pd.DataFrame, symbol: str, name: str = "") -> go.Figure:
@@ -147,31 +226,33 @@ def build_interactive_technical_figure(frame: pd.DataFrame, symbol: str, name: s
     latest_close = float(frame.iloc[-1]["close"])
     fig.add_hline(y=latest_close, line_dash="dot", line_color="#555555", row=1, col=1)
     fig.update_layout(
-        title=title,
+        title={"text": title, "x": 0.0, "xanchor": "left", "y": 0.98, "yanchor": "top"},
         height=720,
+        dragmode="pan",
         hovermode="x unified",
         xaxis_rangeslider_visible=False,
-        margin={"l": 20, "r": 20, "t": 50, "b": 20},
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
+        margin={"l": 20, "r": 20, "t": 90, "b": 20},
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.03,
+            "xanchor": "right",
+            "x": 1,
+            "bgcolor": "rgba(255,255,255,0.85)",
+        },
         template="plotly_white",
+        uirevision=f"{symbol}-technical-chart",
     )
     fig.update_xaxes(
-        rangeselector={
-            "buttons": [
-                {"count": 7, "label": "1周", "step": "day", "stepmode": "backward"},
-                {"count": 1, "label": "1月", "step": "month", "stepmode": "backward"},
-                {"count": 3, "label": "3月", "step": "month", "stepmode": "backward"},
-                {"count": 6, "label": "6月", "step": "month", "stepmode": "backward"},
-                {"count": 1, "label": "1年", "step": "year", "stepmode": "backward"},
-                {"label": "全部", "step": "all"},
-            ]
-        },
+        fixedrange=False,
         row=1,
         col=1,
     )
-    fig.update_yaxes(title_text="价格", row=1, col=1)
-    fig.update_yaxes(title_text="成交量", row=2, col=1)
-    fig.update_yaxes(title_text="MACD", row=3, col=1)
+    fig.update_xaxes(fixedrange=False, row=2, col=1)
+    fig.update_xaxes(fixedrange=False, row=3, col=1)
+    fig.update_yaxes(title_text="价格", fixedrange=True, row=1, col=1)
+    fig.update_yaxes(title_text="成交量", fixedrange=True, row=2, col=1)
+    fig.update_yaxes(title_text="MACD", fixedrange=True, row=3, col=1)
     return fig
 
 
@@ -225,8 +306,22 @@ def _rsi(close: pd.Series, period: int) -> pd.Series:
     delta = close.diff()
     gain = delta.clip(lower=0).rolling(period, min_periods=1).mean()
     loss = (-delta.clip(upper=0)).rolling(period, min_periods=1).mean()
-    rs = gain / loss.replace(0, pd.NA)
-    return (100 - 100 / (1 + rs)).fillna(50.0)
+    rs = gain / loss.mask(loss == 0)
+    return (100 - 100 / (1 + rs)).fillna(50.0).astype(float)
+
+
+def _select_intraday_source(intraday_frame: pd.DataFrame, window: str) -> pd.DataFrame:
+    if "data_source" not in intraday_frame.columns:
+        return intraday_frame.copy()
+
+    source = intraday_frame.copy()
+    data_source = source["data_source"].astype(str)
+    preferred_patterns = ["60m"] if window == "1周" else ["5m", "1m", "15m", "30m"]
+    for pattern in preferred_patterns:
+        filtered = source[data_source.str.contains(pattern, na=False)].copy()
+        if not filtered.empty:
+            return filtered
+    return source
 
 
 def _number_or_quote(row: Any, quote: dict[str, Any], row_key: str, quote_key: str) -> float:
