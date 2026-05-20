@@ -4,6 +4,7 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any
 from urllib.parse import quote_plus
 
@@ -329,6 +330,33 @@ def fetch_a_share_market_data(portfolio: dict[str, Any], beg: str = "20260101", 
     return pd.concat(frames, ignore_index=True).sort_values(["symbol", "date"])
 
 
+def fetch_a_share_intraday_market_data(
+    portfolio: dict[str, Any],
+    frequency: str = "5",
+    frequencies: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    requested_frequencies = tuple(frequencies or (frequency,))
+    frames: list[pd.DataFrame] = []
+    for position in portfolio.get("positions", []):
+        symbol = normalize_a_share_symbol(position)
+        for requested_frequency in requested_frequencies:
+            df = fetch_intraday_market_data_for_position(position, frequency=requested_frequency)
+            if not df.empty:
+                df["symbol"] = symbol
+                frames.append(df)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True).sort_values(["symbol", "date"])
+
+
+def fetch_intraday_market_data_for_position(position: dict[str, Any], frequency: str = "5") -> pd.DataFrame:
+    for fetcher in (fetch_eastmoney_intraday_market_data, fetch_sina_intraday_market_data):
+        df = fetcher(position, frequency=frequency)
+        if not df.empty:
+            return df
+    return pd.DataFrame()
+
+
 def fetch_market_data_for_position(position: dict[str, Any], beg: str = "20260101", end: str | None = None) -> pd.DataFrame:
     for fetcher in (fetch_eastmoney_market_data, fetch_akshare_market_data, fetch_sina_market_data):
         df = fetcher(position, beg=beg, end=end)
@@ -380,6 +408,93 @@ def fetch_eastmoney_market_data(position: dict[str, Any], beg: str = "20260101",
     return pd.DataFrame(rows)
 
 
+def fetch_eastmoney_intraday_market_data(position: dict[str, Any], frequency: str = "5") -> pd.DataFrame:
+    frequency = str(frequency)
+    if frequency not in {"1", "5", "15", "30", "60"}:
+        raise ValueError("frequency must be one of 1, 5, 15, 30, or 60")
+
+    rows: list[dict[str, Any]] = []
+    symbol = normalize_a_share_symbol(position)
+    secid = position.get("secid")
+    if not secid:
+        code = position.get("code") or symbol.split(".")[0]
+        secid = f"1.{code}" if symbol.endswith(".SH") else f"0.{code}"
+    params = {
+        "secid": secid,
+        "ut": EASTMONEY_UT,
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+        "klt": frequency,
+        "fqt": "1",
+        "beg": "0",
+        "end": "20500101",
+    }
+    try:
+        response = eastmoney_get(EASTMONEY_KLINE_URL, params=params)
+        response.raise_for_status()
+        klines = response.json().get("data", {}).get("klines", [])
+    except (requests.RequestException, ValueError, TypeError):
+        klines = []
+    for line in klines:
+        parts = line.split(",")
+        if len(parts) < 6:
+            continue
+        timestamp = pd.to_datetime(parts[0], errors="coerce")
+        if pd.isna(timestamp):
+            continue
+        rows.append(
+            {
+                "date": timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                "open": float(parts[1]),
+                "close": float(parts[2]),
+                "high": float(parts[3]),
+                "low": float(parts[4]),
+                "volume": float(parts[5]),
+                "amount": float(parts[6]) if len(parts) > 6 else 0.0,
+                "data_source": f"eastmoney_{frequency}m",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def fetch_sina_intraday_market_data(
+    position: dict[str, Any],
+    frequency: str = "5",
+    datalen: int = 240,
+) -> pd.DataFrame:
+    frequency = str(frequency)
+    if frequency not in {"1", "5", "15", "30", "60"}:
+        raise ValueError("frequency must be one of 1, 5, 15, 30, or 60")
+
+    symbol = normalize_a_share_symbol(position)
+    params = {"symbol": to_sina_symbol(symbol), "scale": frequency, "ma": "no", "datalen": str(datalen)}
+    try:
+        response = requests.get(SINA_KLINE_URL, params=params, headers={"User-Agent": USER_AGENT}, timeout=20)
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError, TypeError):
+        return pd.DataFrame()
+
+    rows = []
+    for item in data:
+        timestamp = pd.to_datetime(item.get("day"), errors="coerce")
+        if pd.isna(timestamp):
+            continue
+        rows.append(
+            {
+                "date": timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                "open": float(item["open"]),
+                "close": float(item["close"]),
+                "high": float(item["high"]),
+                "low": float(item["low"]),
+                "volume": float(item["volume"]),
+                "amount": float(item.get("amount") or 0.0),
+                "data_source": f"sina_{frequency}m",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def fetch_akshare_market_data(position: dict[str, Any], beg: str = "20260101", end: str | None = None) -> pd.DataFrame:
     try:
         import akshare as ak  # type: ignore
@@ -416,7 +531,7 @@ def fetch_akshare_market_data(position: dict[str, Any], beg: str = "20260101", e
 def fetch_sina_market_data(position: dict[str, Any], beg: str = "20260101", end: str | None = None) -> pd.DataFrame:
     symbol = normalize_a_share_symbol(position)
     sina_symbol = to_sina_symbol(symbol)
-    params = {"symbol": sina_symbol, "scale": "240", "ma": "no", "datalen": "180"}
+    params = {"symbol": sina_symbol, "scale": "240", "ma": "no", "datalen": str(sina_datalen_for_range(beg, end))}
     try:
         response = requests.get(SINA_KLINE_URL, params=params, headers={"User-Agent": USER_AGENT}, timeout=20)
         response.raise_for_status()
@@ -450,6 +565,15 @@ def fetch_sina_market_data(position: dict[str, Any], beg: str = "20260101", end:
             }
         )
     return pd.DataFrame(rows)
+
+
+def sina_datalen_for_range(beg: str, end: str | None = None) -> int:
+    beg_date = pd.to_datetime(beg, format="%Y%m%d", errors="coerce")
+    end_date = pd.to_datetime(end, format="%Y%m%d", errors="coerce") if end else pd.Timestamp(datetime.now().date())
+    if pd.isna(beg_date) or pd.isna(end_date) or end_date < beg_date:
+        return 500
+    calendar_days = max(1, int((end_date - beg_date).days) + 1)
+    return min(2000, max(500, int(calendar_days * 1.45)))
 
 
 def to_sina_symbol(symbol: str) -> str:
