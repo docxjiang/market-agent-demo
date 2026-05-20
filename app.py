@@ -12,6 +12,7 @@ import streamlit as st
 from src.agents import run_all_agents
 from src.a_share_fetcher import (
     fetch_a_share_market_data,
+    fetch_a_share_intraday_market_data,
     fetch_a_share_news,
     fetch_a_share_quote_metrics,
     fetch_recent_financial_reports,
@@ -20,6 +21,16 @@ from src.a_share_fetcher import (
 )
 from src.charting import generate_technical_charts
 from src.expert import llm_expert_reply, local_expert_reply
+from src.interactive_charting import (
+    CHART_WINDOW_OPTIONS,
+    build_interactive_technical_figure,
+    build_key_metrics_table,
+    build_period_return_table,
+    format_chart_range,
+    format_data_source_label,
+    prepare_interactive_price_frame,
+    select_chart_window_frame,
+)
 from src.llm_client import LLMConfig
 from src.news_fetcher import MIN_NEWS_COUNT
 from src.report import build_full_news_report
@@ -87,6 +98,7 @@ def generate_report_cached(
     prefix = output_prefix(code, profile["name"])
 
     market_df = fetch_a_share_market_data(portfolio, beg="20250101")
+    intraday_market_df = fetch_a_share_intraday_market_data(portfolio, frequencies=("5", "60"))
     quote_metrics = fetch_a_share_quote_metrics(portfolio)
     if not market_df.empty and not profile.get("latest_price"):
         latest_close = float(market_df.sort_values("date").iloc[-1]["close"])
@@ -130,6 +142,8 @@ def generate_report_cached(
     )
     if not market_df.empty:
         market_df.to_csv(OUTPUT_DIR / f"{prefix}_market_for_indicators.csv", index=False, encoding="utf-8")
+    if not intraday_market_df.empty:
+        intraday_market_df.to_csv(OUTPUT_DIR / f"{prefix}_intraday_market_for_chart.csv", index=False, encoding="utf-8")
     report_path = OUTPUT_DIR / f"{prefix}_report.md"
     report_path.write_text(report, encoding="utf-8")
 
@@ -137,6 +151,7 @@ def generate_report_cached(
         "portfolio": portfolio,
         "profile": profile,
         "market_df": market_df,
+        "intraday_market_df": intraday_market_df,
         "quote_metrics": quote_metrics,
         "news_items": news_items,
         "financial_reports": financial_reports,
@@ -208,20 +223,105 @@ def sidebar_expert_config() -> dict[str, Any]:
     return config
 
 
-def render_charts(chart_abs_paths: dict[str, dict[str, str]]) -> None:
-    if not chart_abs_paths:
+def render_technical_dashboard(result: dict[str, Any]) -> None:
+    market_df: pd.DataFrame = result["market_df"]
+    intraday_market_df: pd.DataFrame = result.get("intraday_market_df", pd.DataFrame())
+    portfolio = result["portfolio"]
+    profile = result["profile"]
+    quote_metrics = result.get("quote_metrics", {})
+
+    header_left, header_right = st.columns([3, 1])
+    with header_left:
+        st.subheader("交互式技术图表")
+    with header_right:
+        if st.button("刷新行情和图表", use_container_width=True):
+            position = portfolio["positions"][0]
+            st.cache_data.clear()
+            with st.spinner("正在重新抓取行情、新闻、公告并更新图表..."):
+                st.session_state.latest_result = generate_report_cached(
+                    code=str(position["code"]),
+                    quantity=float(position["quantity"]),
+                    cost_price=float(position["cost_price"]),
+                )
+            st.rerun()
+
+    if market_df.empty:
         st.warning("未生成技术图表：行情数据不足或数据源暂不可用。")
         return
-    for symbol, paths in chart_abs_paths.items():
-        st.subheader(f"{symbol} 技术图表")
-        cols = st.columns(1)
-        if paths.get("kline_ma"):
-            cols[0].image(paths["kline_ma"], caption="K 线叠加 MA5 / MA10 / MA20")
-        col_macd, col_amount = st.columns(2)
-        if paths.get("macd"):
-            col_macd.image(paths["macd"], caption="MACD（12/26/9）")
-        if paths.get("amount"):
-            col_amount.image(paths["amount"], caption="成交额")
+
+    for symbol, group in market_df.groupby("symbol"):
+        frame = prepare_interactive_price_frame(market_df, symbol)
+        if frame.empty:
+            st.warning(f"{symbol} 行情数据不足，无法生成交互式图表。")
+            continue
+        intraday_frame = prepare_interactive_price_frame(intraday_market_df, symbol)
+
+        quote = quote_metrics.get(symbol, {})
+        name = profile.get("name", "")
+        latest_close = float(frame.iloc[-1]["close"])
+        previous_close = float(frame.iloc[-2]["close"]) if len(frame) > 1 else latest_close
+        change = latest_close - previous_close
+        change_pct = change / previous_close * 100 if previous_close else 0.0
+        source = group.get("data_source", pd.Series(["unknown"])).iloc[-1]
+
+        window = st.radio(
+            "时间范围",
+            CHART_WINDOW_OPTIONS,
+            index=4,
+            horizontal=True,
+            key=f"chart_window_{symbol}",
+        )
+        chart_frame = select_chart_window_frame(frame, intraday_frame, window)
+        chart_source = (
+            str(chart_frame.get("data_source", pd.Series([source])).iloc[-1])
+            if "data_source" in chart_frame.columns and not chart_frame.empty
+            else str(source)
+        )
+        if window in {"1日", "1周"} and intraday_frame.empty:
+            st.caption("分钟/60分钟 K 线接口暂不可用，短周期视图已回退到日线数据。")
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric(
+            "最新收盘价",
+            f"{latest_close:.2f}",
+            f"{change:+.2f} ({change_pct:+.2f}%)",
+            delta_color="inverse",
+        )
+        m2.markdown(f"**图表区间**  \n{format_chart_range(chart_frame)}")
+        m3.metric("成交量", f"{float(chart_frame.iloc[-1]['volume']):,.0f}")
+        m4.markdown(f"**数据源**  \n{format_data_source_label(chart_source)}")
+
+        figure = build_interactive_technical_figure(chart_frame, symbol=symbol, name=name)
+        st.plotly_chart(
+            figure,
+            use_container_width=True,
+            config={
+                "displayModeBar": True,
+                "scrollZoom": False,
+                "responsive": True,
+                "modeBarButtonsToRemove": [
+                    "zoom2d",
+                    "zoomIn2d",
+                    "zoomOut2d",
+                    "autoScale2d",
+                    "select2d",
+                    "lasso2d",
+                ],
+            },
+        )
+
+        period_table = build_period_return_table(frame)
+        st.subheader("区间涨跌幅")
+        st.dataframe(period_table.drop(columns=["涨跌幅数值"]), hide_index=True, use_container_width=True)
+
+        st.subheader("关键行情与技术指标")
+        metrics_table = build_key_metrics_table(frame, quote)
+        chunk_size = max(1, (len(metrics_table) + 2) // 3)
+        metric_cols = st.columns(3)
+        for index, col in enumerate(metric_cols):
+            start = index * chunk_size
+            end = start + chunk_size
+            col.dataframe(metrics_table.iloc[start:end], hide_index=True, use_container_width=True)
 
 
 def render_expert_chat(result: dict[str, Any], expert_config: dict[str, Any]) -> None:
@@ -358,7 +458,7 @@ def main() -> None:
         st.dataframe(pd.DataFrame(portfolio["positions"]), use_container_width=True)
         if not market_df.empty:
             source = market_df.get("data_source", pd.Series(["unknown"])).iloc[-1]
-            st.write(f"行情数据源：`{source}`")
+            st.write(f"行情数据源：`{format_data_source_label(str(source))}`")
             first = market_df.iloc[0]
             last = market_df.iloc[-1]
             change_pct = (float(last["close"]) / float(first["close"]) - 1) * 100
@@ -371,7 +471,7 @@ def main() -> None:
         st.write(f"报告文件：`{result['report_path']}`")
 
     with tab_charts:
-        render_charts(result["chart_abs_paths"])
+        render_technical_dashboard(result)
 
     with tab_agents:
         for agent_result in agent_results:
