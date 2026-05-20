@@ -7,6 +7,11 @@ from typing import Any
 
 import pandas as pd
 
+from src.news_evidence import (
+    classify_news_item_sentiment,
+    normalized_sentiment_label,
+    select_representative_news_evidence,
+)
 from src.technical_indicators import calculate_indicators, classify_indicators, format_indicator_table
 
 
@@ -46,7 +51,7 @@ def format_optional_percent(value: float) -> str:
 def sentiment_counts(items: list[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for item in items:
-        label = item.get("sentiment_hint", "neutral")
+        label = classify_news_item_sentiment(item)
         counts[label] = counts.get(label, 0) + 1
     return counts
 
@@ -125,8 +130,8 @@ def run_news_agent(portfolio: dict[str, Any], news_items: list[dict[str, Any]]) 
         return AgentResult(name="新闻解读智能体", content="\n".join(lines))
 
     counts = sentiment_counts(related_news)
-    risk_items = [item for item in related_news if item.get("sentiment_hint") == "risk"]
-    positive_items = [item for item in related_news if item.get("sentiment_hint") == "positive"]
+    risk_items = [item for item in related_news if classify_news_item_sentiment(item) == "risk"]
+    positive_items = [item for item in related_news if classify_news_item_sentiment(item) == "positive"]
     evidence = extract_numeric_evidence(related_news)
 
     lines.append(f"样本覆盖：{len(related_news)} 条直接相关资讯；标签分布为 {counts}。")
@@ -145,13 +150,14 @@ def run_news_agent(portfolio: dict[str, Any], news_items: list[dict[str, Any]]) 
 
     lines.append("")
     lines.append("代表性证据链：")
-    for item in related_news[:10]:
+    evidence_items = select_representative_news_evidence(related_news)
+    for item in evidence_items:
         title = item.get("title", "未命名新闻")
-        label = item.get("sentiment_hint", "neutral")
+        label = normalized_sentiment_label(item.get("sentiment_hint"))
         source = item.get("source", "未知来源")
         lines.append(f"- [{label}] {title}（{source}）：{item.get('summary', '')}")
-    if len(related_news) > 10:
-        lines.append(f"- 其余 {len(related_news) - 10} 条直接相关资讯见新闻明细。")
+    if len(related_news) > len(evidence_items):
+        lines.append(f"- 其余 {len(related_news) - len(evidence_items)} 条直接相关资讯见新闻明细。")
 
     return AgentResult(name="新闻解读智能体", content="\n".join(lines))
 
@@ -171,6 +177,7 @@ def run_technical_agent(
         lines.append(
             f"样本区间：{indicators['start_date']} 至 {indicators['end_date']}。本模块计算趋势、动量、波动、量能、估值五类指标，共 {len(format_indicator_table(indicators))} 项。"
         )
+        lines.extend(build_technical_status_lines(group, indicators, classes))
         lines.append("")
         lines.append("| 指标 | 数值 | 含义 |")
         lines.append("| --- | ---: | --- |")
@@ -202,6 +209,42 @@ def run_technical_agent(
         lines.append("")
 
     return AgentResult(name="技术观察智能体", content="\n".join(lines).rstrip())
+
+
+def build_technical_status_lines(
+    group: pd.DataFrame,
+    indicators: dict[str, Any],
+    classes: dict[str, str],
+) -> list[str]:
+    df = group.sort_values("date").copy()
+    close = df["close"].astype(float).reset_index(drop=True)
+    volume = df["volume"].astype(float).reset_index(drop=True)
+    recent = min(10, len(close))
+    recent_change = (float(close.iloc[-1]) / float(close.iloc[-recent]) - 1) * 100 if recent > 1 and close.iloc[-recent] else 0.0
+    volume_ratio = indicators["volume_ratio_5"]
+
+    if recent_change <= -5 and indicators["close_position_pct"] >= 65:
+        status = "高位回调"
+    elif indicators["close"] < indicators["ma20"] and indicators["macd_dif"] < indicators["macd_dea"]:
+        status = "技术转弱"
+    elif indicators["close"] > indicators["ma5"] > indicators["ma20"] and indicators["macd_dif"] > indicators["macd_dea"]:
+        status = "趋势偏强"
+    else:
+        status = "趋势分化"
+
+    volume_view = "放量" if volume_ratio >= 1.3 else "缩量" if volume_ratio <= 0.75 else "量能平稳"
+    latest_volume = float(volume.iloc[-1]) if len(volume) else 0.0
+    return [
+        "",
+        f"技术状态：{status}",
+        "关键证据：",
+        f"- 近 {recent} 个交易日收盘价变化 {recent_change:.2f}%，价格区间分位 {indicators['close_position_pct']:.2f}%。",
+        f"- MACD DIF/DEA 为 {indicators['macd_dif']:.2f}/{indicators['macd_dea']:.2f}，动能判断为{classes['macd']}。",
+        f"- 成交量/5日均量为 {volume_ratio:.2f}，当前量能为{volume_view}；最新成交量 {latest_volume:,.0f}。",
+        "关键观察位：",
+        f"- 上方确认位：MA20 {indicators['ma20']:.2f}，若放量站回，修复信号更有说服力。",
+        f"- 下方风险位：MA60 {indicators['ma60']:.2f} / BOLL下轨 {indicators['boll_lower']:.2f}。",
+    ]
 
 
 def trend_word(value: float, threshold: float = 0.0) -> str:
@@ -319,8 +362,8 @@ def run_risk_agent(
     positions = portfolio.get("positions", [])
     total_value = sum(float(item["quantity"]) * float(item["market_price"]) for item in positions)
     related_news = match_position_news(portfolio, news_items)
-    risk_news = [item for item in related_news if item.get("sentiment_hint") == "risk"]
-    positive_news = [item for item in related_news if item.get("sentiment_hint") == "positive"]
+    risk_news = [item for item in related_news if classify_news_item_sentiment(item) == "risk"]
+    positive_news = [item for item in related_news if classify_news_item_sentiment(item) == "positive"]
     evidence = extract_numeric_evidence(related_news)
 
     lines = ["## 风险提示智能体", ""]

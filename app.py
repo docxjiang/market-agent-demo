@@ -8,6 +8,7 @@ from typing import Any
 
 import pandas as pd
 import streamlit as st
+from dotenv import load_dotenv
 
 from src.agents import run_all_agents
 from src.a_share_fetcher import (
@@ -20,9 +21,11 @@ from src.a_share_fetcher import (
     save_json,
 )
 from src.charting import generate_technical_charts
+from src.decision_summary import build_decision_summary
 from src.expert import llm_expert_reply, local_expert_reply
 from src.interactive_charting import (
     CHART_WINDOW_OPTIONS,
+    build_chart_summary_html,
     build_interactive_technical_figure,
     build_key_metrics_table,
     build_period_return_table,
@@ -37,6 +40,7 @@ from src.report import build_full_news_report
 from src.ui_components import (
     build_agent_analysis_html,
     build_announcement_cards_html,
+    build_decision_summary_html,
     build_news_cards_html,
 )
 
@@ -44,6 +48,7 @@ from src.ui_components import (
 BASE_DIR = Path(__file__).parent
 OUTPUT_DIR = BASE_DIR / "outputs"
 DISCLAIMER = "免责声明：本系统仅用于课程演示和市场信息解读，不构成投资建议。"
+load_dotenv()
 
 
 def infer_exchange(code: str) -> tuple[str, str, str]:
@@ -139,6 +144,13 @@ def generate_report_cached(
         financial_reports=financial_reports,
         quote_metrics=quote_metrics,
     )
+    decision_summary = build_decision_summary(
+        portfolio,
+        market_df,
+        news_items,
+        financial_reports=financial_reports,
+        quote_metrics=quote_metrics,
+    )
     report = build_full_news_report(
         portfolio,
         market_df,
@@ -146,6 +158,8 @@ def generate_report_cached(
         agent_results,
         financial_reports=financial_reports,
         chart_paths=chart_paths,
+        quote_metrics=quote_metrics,
+        decision_summary=decision_summary,
     )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -171,6 +185,7 @@ def generate_report_cached(
         "news_items": news_items,
         "financial_reports": financial_reports,
         "agent_results": agent_results,
+        "decision_summary": decision_summary,
         "report": report,
         "report_path": str(report_path),
         "chart_abs_paths": chart_abs_paths,
@@ -295,16 +310,16 @@ def render_technical_dashboard(result: dict[str, Any]) -> None:
         if window in {"1日", "1周"} and intraday_frame.empty:
             st.caption("分钟/60分钟 K 线接口暂不可用，短周期视图已回退到日线数据。")
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric(
-            "最新收盘价",
-            f"{latest_close:.2f}",
-            f"{change:+.2f} ({change_pct:+.2f}%)",
-            delta_color="inverse",
+        st.html(
+            build_chart_summary_html(
+                latest_close=latest_close,
+                change=change,
+                change_pct=change_pct,
+                chart_range=format_chart_range(chart_frame),
+                volume=float(chart_frame.iloc[-1]["volume"]),
+                data_source=format_data_source_label(chart_source),
+            )
         )
-        m2.markdown(f"**图表区间**  \n{format_chart_range(chart_frame)}")
-        m3.metric("成交量", f"{float(chart_frame.iloc[-1]['volume']):,.0f}")
-        m4.markdown(f"**数据源**  \n{format_data_source_label(chart_source)}")
 
         figure = build_interactive_technical_figure(chart_frame, symbol=symbol, name=name)
         st.plotly_chart(
@@ -452,6 +467,13 @@ def main() -> None:
     financial_reports = result["financial_reports"]
     agent_results = result["agent_results"]
     report = result["report"]
+    decision_summary = result.get("decision_summary") or build_decision_summary(
+        portfolio,
+        market_df,
+        news_items,
+        financial_reports=financial_reports,
+        quote_metrics=result.get("quote_metrics", {}),
+    )
 
     st.success(
         f"报告生成完成：行情 {len(market_df)} 条，新闻 {len(news_items)} 条，财报/公告 {len(financial_reports)} 条。"
@@ -462,6 +484,7 @@ def main() -> None:
     )
 
     with tab_overview:
+        st.html(build_decision_summary_html(decision_summary))
         st.subheader("自动识别结果")
         p1, p2, p3, p4 = st.columns(4)
         p1.metric("股票名称", profile.get("name", "未知"))

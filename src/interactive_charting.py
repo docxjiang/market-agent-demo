@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 from typing import Any
 
 import pandas as pd
@@ -18,6 +19,78 @@ PERIOD_WINDOWS = [
 ]
 
 CHART_WINDOW_OPTIONS = ["1日", "1周", "1月", "3个月", "6个月", "1年", "全部"]
+
+CHART_SUMMARY_STYLES = """
+<style>
+.chart-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin: 8px 0 18px 0;
+  font-family: Inter, "SF Pro Display", "Segoe UI", "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+  color: #111827;
+}
+.chart-summary-item {
+  min-width: 0;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 14px 16px;
+}
+.chart-summary-label {
+  color: #4b5563;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.4;
+}
+.chart-summary-value {
+  margin-top: 8px;
+  color: #111827;
+  font-size: 30px;
+  font-weight: 500;
+  line-height: 1.15;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.chart-summary-subvalue {
+  margin-top: 10px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+.chart-summary-positive {
+  color: #b91c1c;
+  background: #fee2e2;
+}
+.chart-summary-negative {
+  color: #047857;
+  background: #d1fae5;
+}
+.chart-summary-neutral {
+  color: #374151;
+  background: #f3f4f6;
+}
+@media (max-width: 900px) {
+  .chart-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 560px) {
+  .chart-summary-grid {
+    grid-template-columns: 1fr;
+  }
+  .chart-summary-value {
+    font-size: 26px;
+  }
+}
+</style>
+"""
 
 
 def prepare_interactive_price_frame(market_df: pd.DataFrame, symbol: str) -> pd.DataFrame:
@@ -124,6 +197,29 @@ def format_data_source_label(source: str) -> str:
     if "1m" in normalized:
         return f"{provider}（1分钟）"
     return f"{provider}（日线）"
+
+
+def build_chart_summary_html(
+    latest_close: float,
+    change: float,
+    change_pct: float,
+    chart_range: str,
+    volume: float,
+    data_source: str,
+) -> str:
+    change_class = "positive" if change > 0 else "negative" if change < 0 else "neutral"
+    change_text = f"{change:+.2f} ({change_pct:+.2f}%)"
+    cards = [
+        ("最新收盘价", f"{latest_close:.2f}", change_text),
+        ("图表区间", chart_range, ""),
+        ("成交量", f"{volume:,.0f}", ""),
+        ("数据源", data_source, ""),
+    ]
+    items = "\n".join(
+        _chart_summary_item(label, value, subvalue, change_class if subvalue else "")
+        for label, value, subvalue in cards
+    )
+    return f'{CHART_SUMMARY_STYLES}<section class="chart-summary-grid">{items}</section>'
 
 
 def build_interactive_technical_figure(frame: pd.DataFrame, symbol: str, name: str = "") -> go.Figure:
@@ -365,3 +461,23 @@ def _fmt_compact(value: float) -> str:
     if abs_value >= 1_000:
         return f"{value / 1_000:.2f}K"
     return f"{value:.2f}"
+
+
+def _chart_summary_item(label: str, value: str, subvalue: str, subvalue_class: str) -> str:
+    subvalue_html = ""
+    if subvalue:
+        subvalue_html = (
+            f'<div class="chart-summary-subvalue chart-summary-{subvalue_class}">'
+            f"{_escape(subvalue)}</div>"
+        )
+    return f"""
+<article class="chart-summary-item">
+  <div class="chart-summary-label">{_escape(label)}</div>
+  <div class="chart-summary-value">{_escape(value)}</div>
+  {subvalue_html}
+</article>
+"""
+
+
+def _escape(value: str) -> str:
+    return html.escape(value, quote=False)

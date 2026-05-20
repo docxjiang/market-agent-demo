@@ -3,6 +3,8 @@ from __future__ import annotations
 import html
 from typing import Any
 
+from src.news_evidence import normalized_sentiment_label, select_representative_news_evidence
+
 
 UI_STYLES = """
 <style>
@@ -31,6 +33,34 @@ UI_STYLES = """
 }
 .agent-list li {
   margin: 4px 0;
+}
+.agent-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 10px 0 14px 0;
+  overflow: hidden;
+  font-size: 14px;
+}
+.agent-table th {
+  color: #374151;
+  font-weight: 650;
+  text-align: left;
+  background: #f9fafb;
+  border-bottom: 1px solid #e5e7eb;
+  padding: 8px 10px;
+}
+.agent-table td {
+  border-bottom: 1px solid #eef2f7;
+  padding: 8px 10px;
+  vertical-align: top;
+}
+.agent-table tr:last-child td {
+  border-bottom: 0;
+}
+.agent-table .numeric-cell {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .news-card,
 .announcement-card {
@@ -104,20 +134,76 @@ UI_STYLES = """
 .source-link:hover {
   text-decoration: underline;
 }
+.decision-summary {
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 16px;
+  margin: 8px 0 18px 0;
+  color: #111827;
+}
+.decision-summary-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid #eef2f7;
+  padding-bottom: 12px;
+  margin-bottom: 12px;
+}
+.decision-summary-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #374151;
+}
+.decision-summary-state {
+  margin-top: 6px;
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.decision-summary-line {
+  margin-top: 8px;
+  color: #4b5563;
+  line-height: 1.55;
+}
+.decision-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.decision-summary-panel h4 {
+  margin: 0 0 8px 0;
+  color: #111827;
+  font-size: 14px;
+}
+.decision-summary-panel ul {
+  margin: 0;
+  padding-left: 18px;
+}
+.decision-summary-panel li {
+  margin: 5px 0;
+  color: #374151;
+  line-height: 1.55;
+}
+@media (max-width: 760px) {
+  .decision-summary-grid {
+    grid-template-columns: 1fr;
+  }
+}
 </style>
 """
 
 
 SENTIMENT_LABELS = {
-    "risk": "风险",
-    "positive": "正面",
-    "neutral": "中性",
-    "mixed": "混合",
+    "risk": "risk",
+    "positive": "positive",
+    "neutral": "neutral",
 }
 
 
 def sentiment_badge_html(label: str | None) -> str:
-    normalized = (label or "neutral").strip().lower() or "neutral"
+    normalized = normalized_sentiment_label(label)
     css_label = normalized if normalized in SENTIMENT_LABELS else "neutral"
     text = SENTIMENT_LABELS.get(normalized, normalized)
     return f'<span class="sentiment-badge sentiment-{css_label}">{_escape(text)}</span>'
@@ -185,7 +271,8 @@ def build_agent_analysis_html(
     if news_items:
         prefix = content.split("代表性证据链：", 1)[0].strip()
         body = _simple_markdown_html(prefix)
-        evidence = f"<h3>代表性证据链</h3>{build_news_cards_html(news_items, limit=10)}"
+        evidence_items = select_representative_news_evidence(news_items)
+        evidence = f"<h3>代表性证据链</h3>{build_news_cards_html(evidence_items)}"
         return f'{UI_STYLES}<section class="agent-block">{body}{evidence}</section>'
     if financial_reports:
         body = _simple_markdown_html(content)
@@ -194,34 +281,81 @@ def build_agent_analysis_html(
     return f'{UI_STYLES}<section class="agent-block">{_simple_markdown_html(content)}</section>'
 
 
+def build_decision_summary_html(summary: dict[str, Any]) -> str:
+    panels = [
+        ("最重要的3个判断", summary.get("top_judgements", [])),
+        ("关键利多", summary.get("positive_factors", [])),
+        ("关键利空", summary.get("negative_factors", [])),
+        (
+            "后续触发条件",
+            [
+                *(f"偏积极：{item}" for item in summary.get("bullish_triggers", [])[:2]),
+                *(f"偏消极：{item}" for item in summary.get("bearish_triggers", [])[:2]),
+            ],
+        ),
+        ("已持有者关注", summary.get("holder_focus", [])),
+        ("准备买入/卖出关注", [*summary.get("buyer_focus", [])[:2], *summary.get("seller_focus", [])[:2]]),
+    ]
+    panel_html = "\n".join(_decision_panel_html(title, items) for title, items in panels)
+    return f"""
+{UI_STYLES}
+<section class="decision-summary">
+  <div class="decision-summary-header">
+    <div>
+      <div class="decision-summary-title">AI决策摘要</div>
+      <div class="decision-summary-state">{_escape(str(summary.get("state", "信息中性")))}</div>
+      <div class="decision-summary-line">{_escape(str(summary.get("one_line", "")))}</div>
+    </div>
+  </div>
+  <div class="decision-summary-grid">
+    {panel_html}
+  </div>
+</section>
+"""
+
+
 def _simple_markdown_html(content: str) -> str:
     blocks: list[str] = []
     list_items: list[str] = []
-    for raw_line in content.splitlines():
+    lines = content.splitlines()
+    index = 0
+    while index < len(lines):
+        raw_line = lines[index]
         line = raw_line.rstrip()
         if not line.strip():
             if list_items:
                 blocks.append(_list_html(list_items))
                 list_items = []
+            index += 1
             continue
         stripped = line.strip()
-        if stripped.startswith("### "):
+        if _is_markdown_table_start(lines, index):
+            if list_items:
+                blocks.append(_list_html(list_items))
+                list_items = []
+            table_lines, index = _collect_markdown_table(lines, index)
+            blocks.append(_table_html(table_lines))
+        elif stripped.startswith("### "):
             if list_items:
                 blocks.append(_list_html(list_items))
                 list_items = []
             blocks.append(f"<h3>{_escape(stripped[4:])}</h3>")
+            index += 1
         elif stripped.startswith("## "):
             if list_items:
                 blocks.append(_list_html(list_items))
                 list_items = []
             blocks.append(f"<h2>{_escape(stripped[3:])}</h2>")
+            index += 1
         elif stripped.startswith("- "):
             list_items.append(stripped[2:])
+            index += 1
         else:
             if list_items:
                 blocks.append(_list_html(list_items))
                 list_items = []
             blocks.append(f"<p>{_escape(stripped)}</p>")
+            index += 1
     if list_items:
         blocks.append(_list_html(list_items))
     return "\n".join(blocks)
@@ -230,6 +364,83 @@ def _simple_markdown_html(content: str) -> str:
 def _list_html(items: list[str]) -> str:
     lines = "\n".join(f"<li>{_escape(item)}</li>" for item in items)
     return f'<ul class="agent-list">{lines}</ul>'
+
+
+def _decision_panel_html(title: str, items: list[str]) -> str:
+    visible_items = [str(item) for item in items[:4]] or ["暂无明确线索。"]
+    list_html = "".join(f"<li>{_escape(item)}</li>" for item in visible_items)
+    return f'<div class="decision-summary-panel"><h4>{_escape(title)}</h4><ul>{list_html}</ul></div>'
+
+
+def _is_markdown_table_start(lines: list[str], index: int) -> bool:
+    if not _is_table_row(lines[index].strip()):
+        return False
+    next_index = index + 1
+    while next_index < len(lines) and not lines[next_index].strip():
+        next_index += 1
+    return next_index < len(lines) and _is_table_separator(lines[next_index].strip())
+
+
+def _collect_markdown_table(lines: list[str], index: int) -> tuple[list[str], int]:
+    table_lines: list[str] = []
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if not stripped:
+            lookahead = index + 1
+            while lookahead < len(lines) and not lines[lookahead].strip():
+                lookahead += 1
+            if lookahead < len(lines) and _is_table_row(lines[lookahead].strip()):
+                index += 1
+                continue
+            break
+        if not _is_table_row(stripped):
+            break
+        table_lines.append(stripped)
+        index += 1
+    return table_lines, index
+
+
+def _table_html(table_lines: list[str]) -> str:
+    if len(table_lines) < 2:
+        return "\n".join(f"<p>{_escape(line)}</p>" for line in table_lines)
+
+    headers = _split_table_row(table_lines[0])
+    alignment = _split_table_row(table_lines[1])
+    numeric_columns = {
+        index
+        for index, marker in enumerate(alignment)
+        if marker.strip().endswith(":")
+    }
+    body_rows = [_split_table_row(line) for line in table_lines[2:] if not _is_table_separator(line)]
+
+    header_html = "".join(f"<th>{_escape(cell)}</th>" for cell in headers)
+    body_html = "\n".join(
+        "<tr>"
+        + "".join(
+            f'<td class="numeric-cell">{_escape(cell)}</td>'
+            if column_index in numeric_columns
+            else f"<td>{_escape(cell)}</td>"
+            for column_index, cell in enumerate(row)
+        )
+        + "</tr>"
+        for row in body_rows
+    )
+    return f'<table class="agent-table"><thead><tr>{header_html}</tr></thead><tbody>{body_html}</tbody></table>'
+
+
+def _is_table_row(line: str) -> bool:
+    return line.startswith("|") and line.endswith("|") and line.count("|") >= 2
+
+
+def _is_table_separator(line: str) -> bool:
+    if not _is_table_row(line):
+        return False
+    cells = _split_table_row(line)
+    return bool(cells) and all(cell.replace(":", "").replace("-", "").strip() == "" and "---" in cell for cell in cells)
+
+
+def _split_table_row(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
 
 
 def _external_link_html(url: str, label: str) -> str:
