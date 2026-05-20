@@ -20,6 +20,12 @@ from src.a_share_fetcher import (
 )
 from src.charting import generate_technical_charts
 from src.expert import llm_expert_reply, local_expert_reply
+from src.interactive_charting import (
+    build_interactive_technical_figure,
+    build_key_metrics_table,
+    build_period_return_table,
+    prepare_interactive_price_frame,
+)
 from src.llm_client import LLMConfig
 from src.news_fetcher import MIN_NEWS_COUNT
 from src.report import build_full_news_report
@@ -208,20 +214,70 @@ def sidebar_expert_config() -> dict[str, Any]:
     return config
 
 
-def render_charts(chart_abs_paths: dict[str, dict[str, str]]) -> None:
-    if not chart_abs_paths:
+def render_technical_dashboard(result: dict[str, Any]) -> None:
+    market_df: pd.DataFrame = result["market_df"]
+    portfolio = result["portfolio"]
+    profile = result["profile"]
+    quote_metrics = result.get("quote_metrics", {})
+
+    header_left, header_right = st.columns([3, 1])
+    with header_left:
+        st.subheader("交互式技术图表")
+    with header_right:
+        if st.button("刷新行情和图表", use_container_width=True):
+            position = portfolio["positions"][0]
+            st.cache_data.clear()
+            with st.spinner("正在重新抓取行情、新闻、公告并更新图表..."):
+                st.session_state.latest_result = generate_report_cached(
+                    code=str(position["code"]),
+                    quantity=float(position["quantity"]),
+                    cost_price=float(position["cost_price"]),
+                )
+            st.rerun()
+
+    if market_df.empty:
         st.warning("未生成技术图表：行情数据不足或数据源暂不可用。")
         return
-    for symbol, paths in chart_abs_paths.items():
-        st.subheader(f"{symbol} 技术图表")
-        cols = st.columns(1)
-        if paths.get("kline_ma"):
-            cols[0].image(paths["kline_ma"], caption="K 线叠加 MA5 / MA10 / MA20")
-        col_macd, col_amount = st.columns(2)
-        if paths.get("macd"):
-            col_macd.image(paths["macd"], caption="MACD（12/26/9）")
-        if paths.get("amount"):
-            col_amount.image(paths["amount"], caption="成交额")
+
+    for symbol, group in market_df.groupby("symbol"):
+        frame = prepare_interactive_price_frame(market_df, symbol)
+        if frame.empty:
+            st.warning(f"{symbol} 行情数据不足，无法生成交互式图表。")
+            continue
+
+        quote = quote_metrics.get(symbol, {})
+        name = profile.get("name", "")
+        latest_close = float(frame.iloc[-1]["close"])
+        previous_close = float(frame.iloc[-2]["close"]) if len(frame) > 1 else latest_close
+        change = latest_close - previous_close
+        change_pct = change / previous_close * 100 if previous_close else 0.0
+        source = group.get("data_source", pd.Series(["unknown"])).iloc[-1]
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("最新收盘价", f"{latest_close:.2f}", f"{change:+.2f} ({change_pct:+.2f}%)")
+        m2.metric("行情区间", f"{frame.iloc[0]['date'].date()} 至 {frame.iloc[-1]['date'].date()}")
+        m3.metric("成交量", f"{float(frame.iloc[-1]['volume']):,.0f}")
+        m4.metric("数据源", str(source))
+
+        figure = build_interactive_technical_figure(frame, symbol=symbol, name=name)
+        st.plotly_chart(
+            figure,
+            use_container_width=True,
+            config={"displayModeBar": True, "scrollZoom": True, "responsive": True},
+        )
+
+        period_table = build_period_return_table(frame)
+        st.subheader("区间涨跌幅")
+        st.dataframe(period_table.drop(columns=["涨跌幅数值"]), hide_index=True, use_container_width=True)
+
+        st.subheader("关键行情与技术指标")
+        metrics_table = build_key_metrics_table(frame, quote)
+        chunk_size = max(1, (len(metrics_table) + 2) // 3)
+        metric_cols = st.columns(3)
+        for index, col in enumerate(metric_cols):
+            start = index * chunk_size
+            end = start + chunk_size
+            col.dataframe(metrics_table.iloc[start:end], hide_index=True, use_container_width=True)
 
 
 def render_expert_chat(result: dict[str, Any], expert_config: dict[str, Any]) -> None:
@@ -371,7 +427,7 @@ def main() -> None:
         st.write(f"报告文件：`{result['report_path']}`")
 
     with tab_charts:
-        render_charts(result["chart_abs_paths"])
+        render_technical_dashboard(result)
 
     with tab_agents:
         for agent_result in agent_results:
