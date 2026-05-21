@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import json
+import logging
+import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+from src.llm_client import LLMClient
 from src.news_evidence import (
     classify_news_item_sentiment,
     normalized_sentiment_label,
@@ -16,6 +21,13 @@ from src.technical_indicators import calculate_indicators, classify_indicators, 
 
 
 DISCLAIMER = "免责声明：本系统仅用于课程演示和市场信息解读，不构成投资建议。"
+PROMPT_DIR = Path(__file__).resolve().parents[1] / "prompts"
+logger = logging.getLogger(__name__)
+LLM_AGENT_LABELS = {
+    "news_agent.txt": "新闻解读智能体",
+    "technical_agent.txt": "技术观察智能体",
+    "risk_agent.txt": "风险提示智能体",
+}
 
 
 @dataclass
@@ -26,6 +38,103 @@ class AgentResult:
 
 def load_prompt(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def _try_llm_agent(prompt_name: str, payload: dict[str, Any], llm_client: Any | None = None) -> str:
+    agent_label = LLM_AGENT_LABELS.get(prompt_name, prompt_name)
+    if llm_client is False:
+        logger.info("LLM agent %s (%s) skipped because LLM analysis is disabled", agent_label, prompt_name)
+        return ""
+    try:
+        client = llm_client or LLMClient()
+        prompt = load_prompt(PROMPT_DIR / prompt_name)
+        user_prompt = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+        response = client.chat(prompt, f"请基于以下结构化输入输出分析：\n\n{user_prompt}").strip()
+        if response:
+            logger.info("LLM agent %s (%s) loaded successfully", agent_label, prompt_name)
+        else:
+            logger.warning("LLM agent %s (%s) returned an empty response", agent_label, prompt_name)
+        return response
+    except Exception as exc:
+        logger.warning("LLM agent %s (%s) failed: %s", agent_label, prompt_name, exc, exc_info=True)
+        return ""
+
+
+def _llm_max_parallel_requests(default: int = 2) -> int:
+    try:
+        return max(1, int(os.getenv("LLM_MAX_PARALLEL_REQUESTS", str(default))))
+    except ValueError:
+        return default
+
+
+def _compact_news_items(items: list[dict[str, Any]], limit: int = 30) -> list[dict[str, Any]]:
+    return [
+        {
+            "title": item.get("title", ""),
+            "summary": item.get("summary", ""),
+            "source": item.get("source", ""),
+            "date": item.get("date", ""),
+            "sentiment": classify_news_item_sentiment(item),
+            "fetched_via": item.get("fetched_via", ""),
+            "related_symbols": item.get("related_symbols", []),
+        }
+        for item in items[:limit]
+    ]
+
+
+def _compact_financial_reports(items: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
+    return [
+        {
+            "title": item.get("title", ""),
+            "date": item.get("date", ""),
+            "source": item.get("source", ""),
+            "financial_signals": item.get("financial_signals", [])[:6],
+            "content_excerpt": str(item.get("content_excerpt", ""))[:800],
+        }
+        for item in items[:limit]
+    ]
+
+
+def _compact_market_risk(market_df: pd.DataFrame, quote_metrics: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    if market_df.empty or "symbol" not in market_df.columns:
+        return []
+    rows: list[dict[str, Any]] = []
+    for symbol, group in market_df.groupby("symbol"):
+        indicators = calculate_indicators(group, quote_metrics.get(str(symbol)))
+        rows.append(
+            {
+                "symbol": symbol,
+                "period_return_pct": indicators["period_return_pct"],
+                "max_drawdown_pct": indicators["max_drawdown_pct"],
+                "amplitude_pct": indicators["amplitude_pct"],
+                "ma20": indicators["ma20"],
+                "ma60": indicators["ma60"],
+                "macd_dif": indicators["macd_dif"],
+                "macd_dea": indicators["macd_dea"],
+                "volume_ratio_5": indicators["volume_ratio_5"],
+                "pe_dynamic": indicators["pe_dynamic"],
+                "pb": indicators["pb"],
+            }
+        )
+    return rows
+
+
+def clean_llm_agent_reply(content: str, agent_name: str) -> str:
+    redundant_titles = {
+        agent_name,
+        f"LLM{agent_name.replace('智能体', '研判')}",
+        "LLM新闻研判",
+        "LLM技术研判",
+        "LLM风险研判",
+    }
+    cleaned: list[str] = []
+    for raw_line in content.splitlines():
+        stripped = raw_line.strip()
+        normalized = stripped.strip("#* 　：:")
+        if normalized in redundant_titles:
+            continue
+        cleaned.append(raw_line)
+    return "\n".join(cleaned).strip()
 
 
 def pct(value: float) -> str:
@@ -121,7 +230,11 @@ def compute_technical_metrics(group: pd.DataFrame) -> dict[str, float | str]:
     }
 
 
-def run_news_agent(portfolio: dict[str, Any], news_items: list[dict[str, Any]]) -> AgentResult:
+def run_news_agent(
+    portfolio: dict[str, Any],
+    news_items: list[dict[str, Any]],
+    llm_client: Any | None = None,
+) -> AgentResult:
     related_news = match_position_news(portfolio, news_items)
     lines = ["## 新闻解读智能体", ""]
 
@@ -136,17 +249,32 @@ def run_news_agent(portfolio: dict[str, Any], news_items: list[dict[str, Any]]) 
 
     lines.append(f"样本覆盖：{len(related_news)} 条直接相关资讯；标签分布为 {counts}。")
     lines.append("")
-    lines.append("核心主题归纳：")
-    if risk_items:
-        lines.append(
-            f"- 压力主题：{len(risk_items)} 条资讯被识别为风险类，集中在业绩波动、资金净卖出、管理层/治理事件、行业需求与价格体系变化。"
-        )
-    if positive_items:
-        lines.append(
-            f"- 支撑主题：{len(positive_items)} 条资讯被识别为正面类，主要涉及分红、回购、扩产/投资、价格变化、季度增长或订单改善。"
-        )
-    if evidence:
-        lines.append("- 可量化线索：" + "；".join(evidence[:8]) + "。")
+    lines.extend(build_news_sample_table(len(related_news), counts, len(evidence)))
+    llm_analysis = _try_llm_agent(
+        "news_agent.txt",
+        {
+            "portfolio": portfolio,
+            "news_items": _compact_news_items(related_news),
+            "sentiment_counts": counts,
+            "numeric_evidence": evidence[:10],
+        },
+        llm_client,
+    )
+    if llm_analysis:
+        lines.extend(["", "### 新闻研判", clean_llm_agent_reply(llm_analysis, "新闻解读智能体")])
+    else:
+        lines.append("")
+        lines.append("核心主题归纳：")
+        if risk_items:
+            lines.append(
+                f"- 压力主题：{len(risk_items)} 条资讯被识别为风险类，集中在业绩波动、资金净卖出、管理层/治理事件、行业需求与价格体系变化。"
+            )
+        if positive_items:
+            lines.append(
+                f"- 支撑主题：{len(positive_items)} 条资讯被识别为正面类，主要涉及分红、回购、扩产/投资、价格变化、季度增长或订单改善。"
+            )
+        if evidence:
+            lines.append("- 可量化线索：" + "；".join(evidence[:8]) + "。")
 
     lines.append("")
     lines.append("代表性证据链：")
@@ -162,9 +290,20 @@ def run_news_agent(portfolio: dict[str, Any], news_items: list[dict[str, Any]]) 
     return AgentResult(name="新闻解读智能体", content="\n".join(lines))
 
 
+def build_news_sample_table(total: int, counts: dict[str, int], evidence_count: int) -> list[str]:
+    return [
+        "### 新闻样本概览",
+        "",
+        "| 样本数 | positive | risk | neutral | 可量化线索 |",
+        "| ---: | ---: | ---: | ---: | ---: |",
+        f"| {total} | {counts.get('positive', 0)} | {counts.get('risk', 0)} | {counts.get('neutral', 0)} | {evidence_count} |",
+    ]
+
+
 def run_technical_agent(
     market_df: pd.DataFrame,
     quote_metrics: dict[str, dict[str, Any]] | None = None,
+    llm_client: Any | None = None,
 ) -> AgentResult:
     quote_metrics = quote_metrics or {}
     lines = ["## 技术观察智能体", ""]
@@ -172,43 +311,62 @@ def run_technical_agent(
     for symbol, group in market_df.sort_values("date").groupby("symbol"):
         indicators = calculate_indicators(group, quote_metrics.get(symbol))
         classes = classify_indicators(indicators)
+        stock_name = str((quote_metrics.get(symbol) or {}).get("name") or "").strip()
+        heading = f"{stock_name}（{symbol}）" if stock_name and stock_name != symbol else str(symbol)
 
-        lines.append(f"### {symbol}")
+        lines.append(f"### {heading}")
         lines.append(
             f"样本区间：{indicators['start_date']} 至 {indicators['end_date']}。本模块计算趋势、动量、波动、量能、估值五类指标，共 {len(format_indicator_table(indicators))} 项。"
         )
-        lines.extend(build_technical_status_lines(group, indicators, classes))
+        llm_analysis = _try_llm_agent(
+            "technical_agent.txt",
+            {"symbol": symbol, "indicators": indicators, "classes": classes},
+            llm_client,
+        )
+        if not llm_analysis:
+            lines.extend(build_technical_status_lines(group, indicators, classes))
         lines.append("")
         lines.append("| 指标 | 数值 | 含义 |")
         lines.append("| --- | ---: | --- |")
         lines.extend(format_indicator_table(indicators))
-        lines.append("")
-        lines.append("综合解读：")
-        lines.append(
-            f"- 趋势：收盘 {indicators['close']:.2f}，MA5/MA20/MA60 分别为 {indicators['ma5']:.2f}/{indicators['ma20']:.2f}/{indicators['ma60']:.2f}，结构判断为{classes['trend']}。"
-        )
-        lines.append(
-            f"- 动量：MACD DIF {indicators['macd_dif']:.2f}、DEA {indicators['macd_dea']:.2f}、柱值 {indicators['macd_bar']:.2f}，判断为{classes['macd']}；RSI6/12/24 为 {indicators['rsi6']:.2f}/{indicators['rsi12']:.2f}/{indicators['rsi24']:.2f}，对应{classes['rsi']}、{classes['medium_rsi']}。"
-        )
-        lines.append(
-            f"- 摆动：KDJ K/D/J 为 {indicators['kdj_k']:.2f}/{indicators['kdj_d']:.2f}/{indicators['kdj_j']:.2f}，处于{classes['kdj']}；BOLL %B 为 {indicators['boll_percent_b']:.2f}，价格{classes['boll']}。"
-        )
-        lines.append(
-            f"- 波动：ATR14 为 {indicators['atr14']:.2f}，20日年化波动率 {indicators['volatility20_pct']:.2f}%，区间最大回撤 {indicators['max_drawdown_pct']:.2f}%，说明短期波动压力需要和新闻/公告同步观察。"
-        )
-        lines.append(
-            f"- 量能：成交量/5日均量为 {indicators['volume_ratio_5']:.2f}，换手率 {format_optional_percent(indicators['turnover_rate_pct'])}，属于{classes['volume']}。若价格方向与量能背离，信号可信度下降。"
-        )
-        lines.append(
-            f"- 估值：动态PE {format_optional_number(indicators['pe_dynamic'])}，PB {format_optional_number(indicators['pb'])}，判断为{classes['valuation']}；估值指标需要和利润增速、现金分红、行业景气度、公司竞争壁垒一起解释。"
-        )
-        lines.extend(analyze_chart_trends(group, indicators))
-        lines.append(
-            "- 技术面结论：若趋势、MACD、RSI、量能同时改善，说明短线修复更有一致性；若估值仍高而业绩新闻偏弱，则技术反弹更容易受基本面预期压制。"
-        )
+        if llm_analysis:
+            lines.extend(["", "### 技术研判", clean_llm_agent_reply(llm_analysis, "技术观察智能体")])
+        else:
+            lines.extend(build_rule_technical_analysis(group, indicators, classes))
         lines.append("")
 
     return AgentResult(name="技术观察智能体", content="\n".join(lines).rstrip())
+
+
+def build_rule_technical_analysis(
+    group: pd.DataFrame,
+    indicators: dict[str, Any],
+    classes: dict[str, str],
+) -> list[str]:
+    lines = ["", "综合解读："]
+    lines.append(
+        f"- 趋势：收盘 {indicators['close']:.2f}，MA5/MA20/MA60 分别为 {indicators['ma5']:.2f}/{indicators['ma20']:.2f}/{indicators['ma60']:.2f}，结构判断为{classes['trend']}。"
+    )
+    lines.append(
+        f"- 动量：MACD DIF {indicators['macd_dif']:.2f}、DEA {indicators['macd_dea']:.2f}、柱值 {indicators['macd_bar']:.2f}，判断为{classes['macd']}；RSI6/12/24 为 {indicators['rsi6']:.2f}/{indicators['rsi12']:.2f}/{indicators['rsi24']:.2f}，对应{classes['rsi']}、{classes['medium_rsi']}。"
+    )
+    lines.append(
+        f"- 摆动：KDJ K/D/J 为 {indicators['kdj_k']:.2f}/{indicators['kdj_d']:.2f}/{indicators['kdj_j']:.2f}，处于{classes['kdj']}；BOLL %B 为 {indicators['boll_percent_b']:.2f}，价格{classes['boll']}。"
+    )
+    lines.append(
+        f"- 波动：ATR14 为 {indicators['atr14']:.2f}，20日年化波动率 {indicators['volatility20_pct']:.2f}%，区间最大回撤 {indicators['max_drawdown_pct']:.2f}%，说明短期波动压力需要和新闻/公告同步观察。"
+    )
+    lines.append(
+        f"- 量能：成交量/5日均量为 {indicators['volume_ratio_5']:.2f}，换手率 {format_optional_percent(indicators['turnover_rate_pct'])}，属于{classes['volume']}。若价格方向与量能背离，信号可信度下降。"
+    )
+    lines.append(
+        f"- 估值：动态PE {format_optional_number(indicators['pe_dynamic'])}，PB {format_optional_number(indicators['pb'])}，判断为{classes['valuation']}；估值指标需要和利润增速、现金分红、行业景气度、公司竞争壁垒一起解释。"
+    )
+    lines.extend(analyze_chart_trends(group, indicators))
+    lines.append(
+        "- 技术面结论：若趋势、MACD、RSI、量能同时改善，说明短线修复更有一致性；若估值仍高而业绩新闻偏弱，则技术反弹更容易受基本面预期压制。"
+    )
+    return lines
 
 
 def build_technical_status_lines(
@@ -358,6 +516,7 @@ def run_risk_agent(
     market_df: pd.DataFrame,
     financial_reports: list[dict[str, Any]] | None = None,
     quote_metrics: dict[str, dict[str, Any]] | None = None,
+    llm_client: Any | None = None,
 ) -> AgentResult:
     positions = portfolio.get("positions", [])
     total_value = sum(float(item["quantity"]) * float(item["market_price"]) for item in positions)
@@ -368,6 +527,22 @@ def run_risk_agent(
 
     lines = ["## 风险提示智能体", ""]
     lines.append("风险分层：")
+    lines.extend(build_risk_basis_table(positions, total_value, related_news, risk_news, positive_news))
+
+    llm_analysis = _try_llm_agent(
+        "risk_agent.txt",
+        {
+            "portfolio": portfolio,
+            "risk_news": _compact_news_items(risk_news[:10]),
+            "positive_news": _compact_news_items(positive_news[:10]),
+            "financial_reports": _compact_financial_reports(financial_reports or []),
+            "market_risk": _compact_market_risk(market_df, quote_metrics or {}),
+        },
+        llm_client,
+    )
+    if llm_analysis:
+        lines.extend(["### 风险研判", clean_llm_agent_reply(llm_analysis, "风险提示智能体")])
+        return AgentResult(name="风险提示智能体", content="\n".join(lines))
 
     for item in positions:
         value = float(item["quantity"]) * float(item["market_price"])
@@ -415,6 +590,33 @@ def run_risk_agent(
     lines.append("- 资金流向新闻是否从单日净卖出演变为连续多日同向变化。")
 
     return AgentResult(name="风险提示智能体", content="\n".join(lines))
+
+
+def build_risk_basis_table(
+    positions: list[dict[str, Any]],
+    total_value: float,
+    related_news: list[dict[str, Any]],
+    risk_news: list[dict[str, Any]],
+    positive_news: list[dict[str, Any]],
+) -> list[str]:
+    max_weight = 0.0
+    if total_value:
+        max_weight = max(
+            (
+                float(item.get("quantity", 0)) * float(item.get("market_price", 0)) / total_value * 100
+                for item in positions
+            ),
+            default=0.0,
+        )
+    return [
+        "",
+        "### 风险基础数据",
+        "",
+        "| 持仓数量 | 最大单票权重 | 相关新闻 | risk新闻 | positive新闻 |",
+        "| ---: | ---: | ---: | ---: | ---: |",
+        f"| {len(positions)} | {max_weight:.2f}% | {len(related_news)} | {len(risk_news)} | {len(positive_news)} |",
+        "",
+    ]
 
 
 def run_financial_report_agent(financial_reports: list[dict[str, Any]], news_items: list[dict[str, Any]] | None = None) -> AgentResult:
@@ -481,18 +683,35 @@ def run_all_agents(
     market_df: pd.DataFrame,
     financial_reports: list[dict[str, Any]] | None = None,
     quote_metrics: dict[str, dict[str, Any]] | None = None,
+    llm_client: Any | None = None,
 ) -> list[AgentResult]:
-    results = [
-        run_news_agent(portfolio, news_items),
-        run_technical_agent(market_df, quote_metrics=quote_metrics),
-        run_risk_agent(
-            portfolio,
-            news_items,
-            market_df,
-            financial_reports=financial_reports,
-            quote_metrics=quote_metrics,
-        ),
-    ]
+    if llm_client is False:
+        results = [
+            run_news_agent(portfolio, news_items, llm_client=False),
+            run_technical_agent(market_df, quote_metrics=quote_metrics, llm_client=False),
+            run_risk_agent(
+                portfolio,
+                news_items,
+                market_df,
+                financial_reports=financial_reports,
+                quote_metrics=quote_metrics,
+                llm_client=False,
+            ),
+        ]
+    else:
+        with ThreadPoolExecutor(max_workers=_llm_max_parallel_requests()) as executor:
+            news_future = executor.submit(run_news_agent, portfolio, news_items, llm_client)
+            technical_future = executor.submit(run_technical_agent, market_df, quote_metrics, llm_client)
+            risk_future = executor.submit(
+                run_risk_agent,
+                portfolio,
+                news_items,
+                market_df,
+                financial_reports,
+                quote_metrics,
+                llm_client,
+            )
+            results = [news_future.result(), technical_future.result(), risk_future.result()]
     if financial_reports is not None:
         results.insert(1, run_financial_report_agent(financial_reports, news_items=news_items))
     return results

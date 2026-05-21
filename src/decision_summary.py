@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from src.technical_indicators import calculate_indicators
 
 
 DECISION_SUMMARY_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "decision_summary_agent.txt"
+logger = logging.getLogger(__name__)
 
 
 def load_decision_summary_prompt() -> str:
@@ -42,9 +44,12 @@ def build_decision_summary(
                 quote_metrics,
             )
             summary["generated_by"] = "llm"
+            logger.info("Decision summary LLM (AI信息整合) loaded successfully")
             return summary
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Decision summary LLM (AI信息整合) failed: %s", exc, exc_info=True)
+    else:
+        logger.info("Decision summary LLM (AI信息整合) skipped because LLM analysis is disabled")
 
     summary = build_rule_decision_summary(
         portfolio,

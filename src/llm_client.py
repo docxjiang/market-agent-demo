@@ -12,8 +12,16 @@ class LLMConfig:
     api_key: str
     base_url: str
     model: str
-    timeout_seconds: int = 60
+    timeout_seconds: int = 120
     temperature: float = 0.2
+
+
+def llm_timeout_seconds(default: int = 120) -> int:
+    load_dotenv()
+    try:
+        return max(1, int(os.getenv("LLM_TIMEOUT_SECONDS", str(default))))
+    except ValueError:
+        return default
 
 
 class LLMClient:
@@ -25,7 +33,7 @@ class LLMClient:
             api_key=os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY", ""),
             base_url=os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com"),
             model=os.getenv("OPENAI_MODEL", "deepseek-v4-flash"),
-            timeout_seconds=int(os.getenv("LLM_TIMEOUT_SECONDS", "60")),
+            timeout_seconds=llm_timeout_seconds(),
             temperature=float(os.getenv("LLM_TEMPERATURE", "0.2")),
         )
 

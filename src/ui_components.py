@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import re
 from typing import Any
 
 from src.news_evidence import normalized_sentiment_label, select_representative_news_evidence
@@ -44,7 +45,6 @@ UI_STYLES = """
 .agent-table th {
   color: #374151;
   font-weight: 650;
-  text-align: left;
   background: #f9fafb;
   border-bottom: 1px solid #e5e7eb;
   padding: 8px 10px;
@@ -61,6 +61,9 @@ UI_STYLES = """
   text-align: right;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+.agent-table .text-cell {
+  text-align: left;
 }
 .news-card,
 .announcement-card {
@@ -120,6 +123,49 @@ UI_STYLES = """
   color: #374151;
   background: #f3f4f6;
   border: 1px solid #e5e7eb;
+}
+.semantic-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 1px 8px;
+  margin-left: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.6;
+  white-space: nowrap;
+  border: 1px solid #e5e7eb;
+}
+.semantic-positive,
+.semantic-strong,
+.semantic-high {
+  color: #166534;
+  background: #dcfce7;
+  border-color: #bbf7d0;
+}
+.semantic-negative,
+.semantic-low {
+  color: #991b1b;
+  background: #fee2e2;
+  border-color: #fecaca;
+}
+.semantic-neutral,
+.semantic-divergent,
+.semantic-medium,
+.semantic-reflected {
+  color: #374151;
+  background: #f3f4f6;
+  border-color: #e5e7eb;
+}
+.semantic-short {
+  color: #92400e;
+  background: #fef3c7;
+  border-color: #fde68a;
+}
+.semantic-long {
+  color: #1d4ed8;
+  background: #dbeafe;
+  border-color: #bfdbfe;
 }
 .source-link {
   display: inline-flex;
@@ -339,13 +385,13 @@ def _simple_markdown_html(content: str) -> str:
             if list_items:
                 blocks.append(_list_html(list_items))
                 list_items = []
-            blocks.append(f"<h3>{_escape(stripped[4:])}</h3>")
+            blocks.append(f"<h3>{_inline_markdown_html(stripped[4:])}</h3>")
             index += 1
         elif stripped.startswith("## "):
             if list_items:
                 blocks.append(_list_html(list_items))
                 list_items = []
-            blocks.append(f"<h2>{_escape(stripped[3:])}</h2>")
+            blocks.append(f"<h2>{_inline_markdown_html(stripped[3:])}</h2>")
             index += 1
         elif stripped.startswith("- "):
             list_items.append(stripped[2:])
@@ -354,7 +400,7 @@ def _simple_markdown_html(content: str) -> str:
             if list_items:
                 blocks.append(_list_html(list_items))
                 list_items = []
-            blocks.append(f"<p>{_escape(stripped)}</p>")
+            blocks.append(f"<p>{_inline_markdown_html(stripped)}</p>")
             index += 1
     if list_items:
         blocks.append(_list_html(list_items))
@@ -362,14 +408,85 @@ def _simple_markdown_html(content: str) -> str:
 
 
 def _list_html(items: list[str]) -> str:
-    lines = "\n".join(f"<li>{_escape(item)}</li>" for item in items)
+    lines = "\n".join(f"<li>{_inline_semantic_html(item)}</li>" for item in items)
     return f'<ul class="agent-list">{lines}</ul>'
 
 
 def _decision_panel_html(title: str, items: list[str]) -> str:
     visible_items = [str(item) for item in items[:4]] or ["暂无明确线索。"]
-    list_html = "".join(f"<li>{_escape(item)}</li>" for item in visible_items)
+    list_html = "".join(f"<li>{_inline_semantic_html(item)}</li>" for item in visible_items)
     return f'<div class="decision-summary-panel"><h4>{_escape(title)}</h4><ul>{list_html}</ul></div>'
+
+
+def _inline_semantic_html(text: str) -> str:
+    stripped = str(text).strip()
+    match = _semantic_field_match(stripped)
+    if not match:
+        return _inline_markdown_html(stripped)
+    field, value = match
+    css_class = _semantic_class(value)
+    return f'{_escape(field)}：<span class="semantic-badge {css_class}">{_escape(value)}</span>'
+
+
+def _inline_markdown_html(text: str) -> str:
+    value = str(text)
+    pieces: list[str] = []
+    last_index = 0
+    for match in re.finditer(r"\*\*(.+?)\*\*", value):
+        pieces.append(_escape(value[last_index : match.start()]))
+        pieces.append(f"<strong>{_escape(match.group(1))}</strong>")
+        last_index = match.end()
+    pieces.append(_escape(value[last_index:]))
+    return "".join(pieces)
+
+
+def _semantic_field_match(text: str) -> tuple[str, str] | None:
+    for separator in ("：", ":"):
+        if separator not in text:
+            continue
+        field, value = text.split(separator, 1)
+        field = field.strip()
+        value = value.strip(" ；。")
+        if field in {
+            "影响方向",
+            "催化强度",
+            "影响周期",
+            "可信度",
+            "是否已被股价反映",
+            "严重度",
+            "当前风险等级",
+        }:
+            return field, value
+    return None
+
+
+def _semantic_class(value: str) -> str:
+    normalized = value.strip()
+    if normalized in {"利多", "偏积极", "强", "高"}:
+        return "semantic-positive" if normalized in {"利多", "偏积极"} else f"semantic-{_strength_class(normalized)}"
+    if normalized in {"利空", "偏消极", "低"}:
+        return "semantic-negative" if normalized in {"利空", "偏消极"} else "semantic-low"
+    if normalized in {"中性", "分歧", "中", "中高", "部分反映", "大概率已反映", "尚未充分反映", "无法判断"}:
+        if normalized == "分歧":
+            return "semantic-divergent"
+        if normalized in {"部分反映", "大概率已反映", "尚未充分反映", "无法判断"}:
+            return "semantic-reflected"
+        return "semantic-medium" if normalized in {"中", "中高"} else "semantic-neutral"
+    if normalized == "短线":
+        return "semantic-short"
+    if normalized == "长期":
+        return "semantic-long"
+    if normalized == "中期":
+        return "semantic-medium"
+    return "semantic-neutral"
+
+
+def _strength_class(value: str) -> str:
+    if value == "强":
+        return "strong"
+    if value == "高":
+        return "high"
+    return "medium"
 
 
 def _is_markdown_table_start(lines: list[str], index: int) -> bool:
@@ -413,13 +530,16 @@ def _table_html(table_lines: list[str]) -> str:
     }
     body_rows = [_split_table_row(line) for line in table_lines[2:] if not _is_table_separator(line)]
 
-    header_html = "".join(f"<th>{_escape(cell)}</th>" for cell in headers)
+    header_html = "".join(
+        f'<th class="{"numeric-cell" if index in numeric_columns else "text-cell"}">{_inline_markdown_html(cell)}</th>'
+        for index, cell in enumerate(headers)
+    )
     body_html = "\n".join(
         "<tr>"
         + "".join(
-            f'<td class="numeric-cell">{_escape(cell)}</td>'
+            f'<td class="numeric-cell">{_inline_markdown_html(cell)}</td>'
             if column_index in numeric_columns
-            else f"<td>{_escape(cell)}</td>"
+            else f'<td class="text-cell">{_inline_markdown_html(cell)}</td>'
             for column_index, cell in enumerate(row)
         )
         + "</tr>"
