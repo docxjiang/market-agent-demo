@@ -6,6 +6,7 @@ from typing import Any
 import pandas as pd
 
 from src.agents import AgentResult
+from src.decision_summary import build_decision_summary, decision_summary_to_markdown
 
 
 DISCLAIMER = "免责声明：本系统仅用于课程演示和市场信息解读，不构成投资建议。"
@@ -60,6 +61,8 @@ def build_report(
     news_items: list[dict[str, Any]] | None = None,
     financial_reports: list[dict[str, Any]] | None = None,
     chart_paths: dict[str, dict[str, str]] | None = None,
+    quote_metrics: dict[str, dict[str, Any]] | None = None,
+    decision_summary: dict[str, Any] | None = None,
 ) -> str:
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     sections = [
@@ -68,6 +71,17 @@ def build_report(
         f"生成时间：{generated_at}",
         "",
         "> 本报告由多智能体流程生成；如启用 LLM 精修，会在规则分析结果基础上进行语言组织。",
+        "",
+        decision_summary_to_markdown(
+            decision_summary
+            or build_decision_summary(
+                portfolio,
+                market_df,
+                news_items or [],
+                financial_reports=financial_reports or [],
+                quote_metrics=quote_metrics or {},
+            )
+        ),
         "",
         build_portfolio_snapshot(portfolio),
         "",
@@ -142,6 +156,8 @@ def build_full_news_report(
     agent_results: list[AgentResult],
     financial_reports: list[dict[str, Any]] | None = None,
     chart_paths: dict[str, dict[str, str]] | None = None,
+    quote_metrics: dict[str, dict[str, Any]] | None = None,
+    decision_summary: dict[str, Any] | None = None,
 ) -> str:
     report = build_report(
         portfolio,
@@ -150,6 +166,8 @@ def build_full_news_report(
         news_items=news_items,
         financial_reports=financial_reports,
         chart_paths=chart_paths,
+        quote_metrics=quote_metrics,
+        decision_summary=decision_summary,
     )
     lines = [report]
 

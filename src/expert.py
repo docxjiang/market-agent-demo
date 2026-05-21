@@ -101,34 +101,45 @@ def local_expert_reply(result: dict[str, Any], question: str) -> str:
     market_df: pd.DataFrame = result["market_df"]
     news_items = result["news_items"]
     financial_reports = result["financial_reports"]
-    position = portfolio["positions"][0]
+    positions = portfolio.get("positions", [])
     related_risk_news = [item for item in news_items if item.get("sentiment_hint") == "risk"]
     related_positive_news = [item for item in news_items if item.get("sentiment_hint") == "positive"]
+    total_value = sum(float(item.get("quantity", 0)) * float(item.get("market_price", 0)) for item in positions)
+    max_weight = max(
+        (
+            float(item.get("quantity", 0)) * float(item.get("market_price", 0)) / total_value * 100
+            for item in positions
+        ),
+        default=0.0,
+    ) if total_value else 0.0
 
     lines = [
-        f"## 专家意见：{position['name']}（{position['symbol']}）",
+        f"## 专家意见：组合持仓（{len(positions)} 个标的）",
         "",
         f"你的问题：{question}",
         "",
         "### 事实依据",
-        f"- 持仓行业：{position.get('sector', '未知')}；成本价：{position.get('cost_price')}；当前价：{position.get('market_price')}。",
+        f"- 组合市值：{total_value:,.2f}；最大单票权重：{max_weight:.2f}%。",
+        "- 持仓标的：" + "；".join(
+            f"{item.get('name', '')}（{item.get('symbol', '')}，{item.get('sector', '未知')}）"
+            for item in positions
+        ),
         f"- 新闻样本：{len(news_items)} 条，其中风险标签 {len(related_risk_news)} 条、正面标签 {len(related_positive_news)} 条。",
         f"- 财报/公告样本：{len(financial_reports)} 条。",
     ]
 
     if not market_df.empty:
-        symbol = position["symbol"]
-        group = market_df[market_df["symbol"] == symbol]
-        indicators = calculate_indicators(group, result.get("quote_metrics", {}).get(symbol))
-        classes = classify_indicators(indicators)
-        lines.extend(
-            [
-                f"- 行情区间：{indicators['start_date']} 至 {indicators['end_date']}，区间收益 {indicators['period_return_pct']:.2f}%，最大回撤 {indicators['max_drawdown_pct']:.2f}%。",
-                f"- MA结构：MA5/MA20/MA60 为 {indicators['ma5']:.2f}/{indicators['ma20']:.2f}/{indicators['ma60']:.2f}，判断为{classes['trend']}。",
-                f"- MACD：DIF {indicators['macd_dif']:.2f}、DEA {indicators['macd_dea']:.2f}、柱值 {indicators['macd_bar']:.2f}，判断为{classes['macd']}。",
-                f"- 量能：成交量/5日均量为 {indicators['volume_ratio_5']:.2f}，属于{classes['volume']}。",
-            ]
-        )
+        for symbol, group in market_df.groupby("symbol"):
+            if group.empty:
+                continue
+            indicators = calculate_indicators(group, result.get("quote_metrics", {}).get(symbol))
+            classes = classify_indicators(indicators)
+            lines.extend(
+                [
+                    f"- {symbol}：{indicators['start_date']} 至 {indicators['end_date']}，区间收益 {indicators['period_return_pct']:.2f}%，最大回撤 {indicators['max_drawdown_pct']:.2f}%。",
+                    f"  MA5/MA20/MA60 为 {indicators['ma5']:.2f}/{indicators['ma20']:.2f}/{indicators['ma60']:.2f}，趋势{classes['trend']}；MACD {classes['macd']}。",
+                ]
+            )
 
     financial_signals = [
         signal
